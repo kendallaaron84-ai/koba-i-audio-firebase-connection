@@ -10,9 +10,6 @@ if (!defined('ABSPATH')) {
 
 class KOBA_Content_Sync {
 
-    // The endpoint we just built in Next.js
-    private $api_endpoint = 'https://dashboard.koba-i.com/api/content/public'; 
-
     public function __construct() {
         // Hook into WP-Cron to run automatically (e.g., hourly)
         add_action('koba_pull_content_cron', [$this, 'pull_and_publish_content']);
@@ -22,54 +19,63 @@ class KOBA_Content_Sync {
     }
 
     /**
+     * Retrieves the dynamic API endpoint
+     */
+    private function get_api_endpoint() {
+        $base_url = function_exists('koba_get_command_center_url') 
+            ? koba_get_command_center_url() 
+            : get_option('koba_api_url', 'https://bug-free-robot-khaki.vercel.app');
+            
+        return rtrim($base_url, '/') . '/api/content/public';
+    }
+
+    /**
      * The core sync engine
      */
     public function pull_and_publish_content() {
-        // 1. Get the securely stored Tenant Key
-        $studio_key = get_option('koba_studio_key');
+        // 1. 🚀 FIX: Grab the securely stored License Key (was 'koba_studio_key')
+        $studio_key = get_option('koba_license_key');
         if (empty($studio_key)) {
             return false;
         }
 
-        // 2. Safely fetch the data from Next.js, bypassing inbound WAF firewalls
-        $response = wp_remote_get($this->api_endpoint . '?limit=5', [
+        // 2. 🚀 FIX: Safely fetch the data from Next.js using dynamic routing, bypassing WAF firewalls
+        $api_endpoint = $this->get_api_endpoint();
+        $response = wp_remote_get($api_endpoint . '?limit=5', [
             'headers' => [
-                'X-Studio-Key' => $studio_key,
-                'Accept'       => 'application/json'
+                'X-Studio-Key' => $studio_key
             ],
             'timeout' => 15
         ]);
 
         if (is_wp_error($response)) {
-            error_log('KOBA Sync Error: ' . $response->get_error_message());
             return false;
         }
 
         $body = wp_remote_retrieve_body($response);
-        $data = json_decode($body, true);
+        $blueprints = json_decode($body, true);
 
-        if (empty($data['success']) || empty($data['content'])) {
-            return false;
+        if (empty($blueprints) || !is_array($blueprints)) {
+            return 0; // Nothing new to sync
         }
 
         $imported_count = 0;
 
-        // 3. Iterate through the AI-generated posts
-        foreach ($data['content'] as $blueprint) {
-            
-            // 4. Deduplication Check: Does this post already exist?
+        foreach ($blueprints as $blueprint) {
+            // 3. Prevent Duplicates
             $existing_post = get_posts([
-                'post_type'  => 'post',
                 'meta_key'   => '_koba_blueprint_id',
                 'meta_value' => sanitize_text_field($blueprint['id']),
-                'fields'     => 'ids' // Only get the ID for speed
+                'post_type'  => 'post',
+                'post_status'=> 'any',
+                'fields'     => 'ids' // Only fetch the ID for speed
             ]);
 
             if (!empty($existing_post)) {
                 continue; // Skip, we already published this one
             }
 
-            // 5. Inject as a Native WordPress Post
+            // 4. Inject as a Native WordPress Post
             $post_data = [
                 'post_title'   => sanitize_text_field($blueprint['title']),
                 'post_content' => wp_kses_post($blueprint['body']), // Keeps safe HTML, strips malicious tags
@@ -99,8 +105,10 @@ class KOBA_Content_Sync {
         
         $count = $this->pull_and_publish_content();
         
-        wp_send_json_success(['message' => "Sync complete. Imported {$count} new posts."]);
+        if ($count !== false) {
+            wp_send_json_success(['imported' => $count]);
+        } else {
+            wp_send_json_error(['message' => 'Sync failed. Check connection.']);
+        }
     }
 }
-
-new KOBA_Content_Sync();
